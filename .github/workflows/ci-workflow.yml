@@ -254,6 +254,20 @@ jobs:
           large-packages: true
           swap-storage: true
 
+      - name: Setup pixi
+        uses: prefix-dev/setup-pixi@v0.9.4
+        with:
+          pixi-version: v0.68.1
+          cache: false
+          activate-environment: true
+
+      - name: Configure ADBC runtime
+        run: |
+          curl -LsSf https://dbc.columnar.tech/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "LD_LIBRARY_PATH=${CONDA_PREFIX}/lib:${LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+          "$HOME/.local/bin/dbc" install --level user duckdb
+
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
         with:
@@ -311,7 +325,23 @@ jobs:
           uv venv
 
       - name: Install dependencies
-        run: uv pip install rangehttpserver requests
+        run: uv pip install duckdb rangehttpserver requests
+
+      - name: Create ADBC DuckDB fixture
+        run: |
+          uv run python - <<'PY'
+          import duckdb
+
+          con = duckdb.connect("extension/adbc/test/adbc.duckdb")
+          con.execute("CREATE OR REPLACE TABLE games(id BIGINT, title VARCHAR, score BIGINT)")
+          con.execute("""
+              INSERT INTO games VALUES
+              (1, 'Portal', 95),
+              (2, 'Celeste', 94),
+              (3, 'Hades', 93)
+          """)
+          con.close()
+          PY
 
       # shell needs to be built first to generate the dataset provided by the server
       - name: Extension test build

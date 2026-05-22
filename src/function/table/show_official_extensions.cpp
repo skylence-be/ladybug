@@ -12,6 +12,7 @@ namespace lbug {
 namespace function {
 
 static constexpr std::pair<std::string_view, std::string_view> extensions[] = {
+    {"ADBC", "Adds support for reading from ADBC data sources"},
     {"ALGO", "Adds support for graph algorithms"},
     {"AZURE", "Adds support for reading from azure blob storage"},
     {"DELTA", "Adds support for reading from delta tables"},
