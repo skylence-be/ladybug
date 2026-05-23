@@ -226,8 +226,18 @@ TEST_F(OptimizerTest, SubqueryHint) {
 }
 
 TEST_F(OptimizerTest, CountRelTableOptimizer) {
+    ASSERT_TRUE(conn->query("CREATE NODE TABLE opt_user(id INT64, PRIMARY KEY(id));")->isSuccess());
+    ASSERT_TRUE(conn->query("CREATE REL TABLE opt_follows(FROM opt_user TO opt_user, date DATE);")
+                    ->isSuccess());
+    ASSERT_TRUE(conn->query("CREATE (:opt_user {id: 1});")->isSuccess());
+    ASSERT_TRUE(conn->query("CREATE (:opt_user {id: 2});")->isSuccess());
+    ASSERT_TRUE(conn->query("MATCH (a:opt_user), (b:opt_user) "
+                            "WHERE a.id = 1 AND b.id = 2 "
+                            "CREATE (a)-[:opt_follows {date: date('2020-01-01')}]->(b);")
+                    ->isSuccess());
+
     // Test that COUNT(*) over a single rel table is optimized to COUNT_REL_TABLE
-    auto q1 = "MATCH (a:person)-[e:knows]->(b:person) RETURN COUNT(*);";
+    auto q1 = "MATCH (a:opt_user)-[e:opt_follows]->(b:opt_user) RETURN COUNT(*);";
     auto plan1 = getRoot(q1);
     ASSERT_TRUE(hasOperatorType(plan1->getLastOperator().get(),
         planner::LogicalOperatorType::COUNT_REL_TABLE));
@@ -236,24 +246,47 @@ TEST_F(OptimizerTest, CountRelTableOptimizer) {
     ASSERT_TRUE(result1->isSuccess());
     ASSERT_EQ(result1->getNumTuples(), 1);
     auto tuple1 = result1->getNext();
-    ASSERT_EQ(tuple1->getValue(0)->getValue<int64_t>(), 14);
+    ASSERT_EQ(tuple1->getValue(0)->getValue<int64_t>(), 1);
 
     // Test that COUNT(*) with GROUP BY is NOT optimized (has keys)
-    auto q2 = "MATCH (a:person)-[e:knows]->(b:person) RETURN a.fName, COUNT(*);";
+    auto q2 = "MATCH (a:opt_user)-[e:opt_follows]->(b:opt_user) RETURN a.id, COUNT(*);";
     auto plan2 = getRoot(q2);
     ASSERT_FALSE(hasOperatorType(plan2->getLastOperator().get(),
         planner::LogicalOperatorType::COUNT_REL_TABLE));
 
     // Test that COUNT(*) with WHERE clause is NOT optimized (has filter)
-    auto q3 = "MATCH (a:person)-[e:knows]->(b:person) WHERE a.ID > 0 RETURN COUNT(*);";
+    auto q3 = "MATCH (a:opt_user)-[e:opt_follows]->(b:opt_user) WHERE a.id > 0 RETURN COUNT(*);";
     auto plan3 = getRoot(q3);
     ASSERT_FALSE(hasOperatorType(plan3->getLastOperator().get(),
         planner::LogicalOperatorType::COUNT_REL_TABLE));
 
     // Test that COUNT(DISTINCT ...) is NOT optimized
-    auto q4 = "MATCH (a:person)-[e:knows]->(b:person) RETURN COUNT(DISTINCT a);";
+    auto q4 = "MATCH (a:opt_user)-[e:opt_follows]->(b:opt_user) RETURN COUNT(DISTINCT a);";
     auto plan4 = getRoot(q4);
     ASSERT_FALSE(hasOperatorType(plan4->getLastOperator().get(),
+        planner::LogicalOperatorType::COUNT_REL_TABLE));
+
+    // Test that COUNT(rel) over a full unfiltered rel scan is optimized to COUNT_REL_TABLE
+    auto q5 = "MATCH (a:opt_user)-[e:opt_follows]->(b:opt_user) RETURN COUNT(e);";
+    auto plan5 = getRoot(q5);
+    ASSERT_TRUE(hasOperatorType(plan5->getLastOperator().get(),
+        planner::LogicalOperatorType::COUNT_REL_TABLE));
+    auto result5 = conn->query(q5);
+    ASSERT_TRUE(result5->isSuccess());
+    ASSERT_EQ(result5->getNumTuples(), 1);
+    auto tuple5 = result5->getNext();
+    ASSERT_EQ(tuple5->getValue(0)->getValue<int64_t>(), 1);
+
+    // Test that COUNT(node) is NOT optimized by the rel-table fast path
+    auto q6 = "MATCH (a:opt_user)-[e:opt_follows]->(b:opt_user) RETURN COUNT(a);";
+    auto plan6 = getRoot(q6);
+    ASSERT_FALSE(hasOperatorType(plan6->getLastOperator().get(),
+        planner::LogicalOperatorType::COUNT_REL_TABLE));
+
+    // Test that COUNT(rel property) is NOT optimized
+    auto q7 = "MATCH (a:opt_user)-[e:opt_follows]->(b:opt_user) RETURN COUNT(e.date);";
+    auto plan7 = getRoot(q7);
+    ASSERT_FALSE(hasOperatorType(plan7->getLastOperator().get(),
         planner::LogicalOperatorType::COUNT_REL_TABLE));
 }
 

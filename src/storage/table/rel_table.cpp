@@ -1,6 +1,7 @@
 #include "storage/table/rel_table.h"
 
 #include <algorithm>
+#include <queue>
 
 #include "catalog/catalog_entry/rel_group_catalog_entry.h"
 #include "common/exception/message.h"
@@ -549,6 +550,134 @@ row_idx_t RelTable::getNumTotalRows(const Transaction* transaction) {
         numLocalRows = localTable->getNumTotalRows();
     }
     return numLocalRows + nextRelOffset;
+}
+
+std::vector<std::pair<offset_t, row_idx_t>> RelTable::getTopKDegrees(const Transaction* transaction,
+    RelDataDirection direction, idx_t k) {
+    if (k == 0) {
+        return {};
+    }
+    using degree_entry_t = std::pair<offset_t, row_idx_t>;
+    auto better = [](const degree_entry_t& a, const degree_entry_t& b) {
+        return a.second > b.second || (a.second == b.second && a.first < b.first);
+    };
+    auto worseForHeap = [better](const degree_entry_t& a, const degree_entry_t& b) {
+        return better(a, b);
+    };
+    std::priority_queue<degree_entry_t, std::vector<degree_entry_t>, decltype(worseForHeap)> heap{
+        worseForHeap};
+
+    const auto pushDegree = [&](offset_t offset, row_idx_t degree) {
+        if (degree == 0) {
+            return;
+        }
+        degree_entry_t entry{offset, degree};
+        if (heap.size() < k) {
+            heap.push(entry);
+        } else if (better(entry, heap.top())) {
+            heap.pop();
+            heap.push(entry);
+        }
+    };
+
+    auto* memoryManager = this->memoryManager;
+    auto* relTableData = getDirectedTableData(direction);
+    auto* csrLengthColumn = relTableData->getCSRLengthColumn();
+    for (node_group_idx_t nodeGroupIdx = 0; nodeGroupIdx < relTableData->getNumNodeGroups();
+         nodeGroupIdx++) {
+        auto* nodeGroup = relTableData->getNodeGroup(nodeGroupIdx);
+        if (!nodeGroup) {
+            continue;
+        }
+        auto& csrNodeGroup = nodeGroup->cast<CSRNodeGroup>();
+        auto groupStartOffset = StorageUtils::getStartOffsetOfNodeGroup(nodeGroupIdx);
+        std::vector<row_idx_t> degrees(StorageConfig::NODE_GROUP_SIZE, 0);
+        if (auto* persistentGroup = csrNodeGroup.getPersistentChunkedGroup()) {
+            auto& csrPersistentGroup = persistentGroup->cast<ChunkedCSRNodeGroup>();
+            auto& csrHeader = csrPersistentGroup.getCSRHeader();
+            auto numNodes = csrHeader.length->getNumValues();
+            auto lengthChunk =
+                ColumnChunkFactory::createColumnChunkData(*memoryManager, LogicalType::UINT64(),
+                    false, StorageConfig::NODE_GROUP_SIZE, ResidencyState::IN_MEMORY, false);
+            ChunkState chunkState;
+            csrHeader.length->initializeScanState(chunkState, csrLengthColumn);
+            csrLengthColumn->scan(chunkState, lengthChunk.get(), 0, numNodes);
+            auto* lengthData = reinterpret_cast<const uint64_t*>(lengthChunk->getData());
+            for (offset_t i = 0; i < numNodes; ++i) {
+                degrees[i] += lengthData[i];
+            }
+        }
+        if (const auto* csrIndex = csrNodeGroup.getCSRIndex()) {
+            for (offset_t i = 0; i < StorageConfig::NODE_GROUP_SIZE; ++i) {
+                degrees[i] += csrIndex->getNumRows(i);
+            }
+        }
+        for (offset_t i = 0; i < StorageConfig::NODE_GROUP_SIZE; ++i) {
+            pushDegree(groupStartOffset + i, degrees[i]);
+        }
+    }
+    if (transaction->isWriteTransaction()) {
+        if (auto* localTable = transaction->getLocalStorage()->getLocalTable(tableID)) {
+            auto& localRelTable = localTable->cast<LocalRelTable>();
+            for (const auto& [nodeOffset, rowIndices] : localRelTable.getCSRIndex(direction)) {
+                pushDegree(nodeOffset, rowIndices.size());
+            }
+        }
+    }
+
+    std::vector<degree_entry_t> result;
+    while (!heap.empty()) {
+        result.push_back(heap.top());
+        heap.pop();
+    }
+    std::sort(result.begin(), result.end(), better);
+    return result;
+}
+
+row_idx_t RelTable::getNumActiveBoundNodes(const Transaction* transaction,
+    RelDataDirection direction) {
+    row_idx_t result = 0;
+    auto* relTableData = getDirectedTableData(direction);
+    auto* csrLengthColumn = relTableData->getCSRLengthColumn();
+    for (node_group_idx_t nodeGroupIdx = 0; nodeGroupIdx < relTableData->getNumNodeGroups();
+         nodeGroupIdx++) {
+        auto* nodeGroup = relTableData->getNodeGroup(nodeGroupIdx);
+        if (!nodeGroup) {
+            continue;
+        }
+        auto& csrNodeGroup = nodeGroup->cast<CSRNodeGroup>();
+        std::vector<bool> hasRels(StorageConfig::NODE_GROUP_SIZE, false);
+        if (auto* persistentGroup = csrNodeGroup.getPersistentChunkedGroup()) {
+            auto& csrPersistentGroup = persistentGroup->cast<ChunkedCSRNodeGroup>();
+            auto& csrHeader = csrPersistentGroup.getCSRHeader();
+            auto numNodes = csrHeader.length->getNumValues();
+            auto lengthChunk =
+                ColumnChunkFactory::createColumnChunkData(*memoryManager, LogicalType::UINT64(),
+                    false, StorageConfig::NODE_GROUP_SIZE, ResidencyState::IN_MEMORY, false);
+            ChunkState chunkState;
+            csrHeader.length->initializeScanState(chunkState, csrLengthColumn);
+            csrLengthColumn->scan(chunkState, lengthChunk.get(), 0, numNodes);
+            auto* lengthData = reinterpret_cast<const uint64_t*>(lengthChunk->getData());
+            for (offset_t i = 0; i < numNodes; ++i) {
+                hasRels[i] = lengthData[i] > 0;
+            }
+        }
+        if (const auto* csrIndex = csrNodeGroup.getCSRIndex()) {
+            for (offset_t i = 0; i < StorageConfig::NODE_GROUP_SIZE; ++i) {
+                hasRels[i] = hasRels[i] || csrIndex->getNumRows(i) > 0;
+            }
+        }
+        result += std::count(hasRels.begin(), hasRels.end(), true);
+    }
+    if (transaction->isWriteTransaction()) {
+        if (auto* localTable = transaction->getLocalStorage()->getLocalTable(tableID)) {
+            auto& localRelTable = localTable->cast<LocalRelTable>();
+            for (const auto& [_, rowIndices] : localRelTable.getCSRIndex(direction)) {
+                result += !rowIndices.empty();
+            }
+        }
+    }
+    return result;
 }
 
 void RelTable::serialize(Serializer& ser) const {
