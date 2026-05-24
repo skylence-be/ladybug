@@ -189,6 +189,13 @@ jobs:
           cp -P install/lib*/liblbug.so install/lib*/liblbug.so.* .
           cp -L install/lib*/liblbug.a .
           cp install/bin/lbug .
+          # Collect the bundled third-party static archives that liblbug.a
+          # references (yyjson, simsimd, antlr, zstd, ...). They live in the
+          # CMake build tree, not in install/, so the static tarball is
+          # incomplete without them and consumers fail to link.
+          mkdir -p deps
+          find build/release/third_party -name 'lib*.a' -exec cp -L {} deps/ \;
+          ls -l deps/
 
       - name: Collect artifacts (Linux perf)
         if: runner.os == 'Linux' && matrix.variant == 'perf'
@@ -196,6 +203,10 @@ jobs:
           cp install/include/lbug.h .
           cp install/include/lbug.hpp .
           cp -L install/lib*/liblbug.a .
+          # Bundled third-party static archives referenced by liblbug.a.
+          mkdir -p deps
+          find build/release/third_party -name 'lib*.a' -exec cp -L {} deps/ \;
+          ls -l deps/
 
       - name: Collect artifacts (macOS)
         if: runner.os == 'macOS'
@@ -208,6 +219,10 @@ jobs:
           cp -P install/lib/liblbug.dylib install/lib/liblbug.*.dylib .
           cp -L install/lib/liblbug.a .
           cp install/bin/lbug .
+          # Bundled third-party static archives referenced by liblbug.a.
+          mkdir -p deps
+          find build/release/third_party -name 'lib*.a' -exec cp -L {} deps/ \;
+          ls -l deps/
 
       - name: Verify binary information (macOS)
         if: runner.os == 'macOS'
@@ -227,6 +242,12 @@ jobs:
           Copy-Item install\lib\lbug_shared.lib .
           Copy-Item install\lib\lbug.lib .
           Copy-Item install\bin\lbug_shell.exe lbug.exe
+          # Bundled third-party static archives referenced by lbug.lib.
+          New-Item -ItemType Directory -Force -Path deps | Out-Null
+          Get-ChildItem -Path build\release\third_party -Recurse -Filter *.lib |
+            Where-Object { $_.Name -ne 'lbug.lib' -and $_.Name -ne 'lbug_shared.lib' } |
+            ForEach-Object { Copy-Item $_.FullName deps\ }
+          Get-ChildItem deps\
 
       # ---- Create archives ----
 
@@ -237,13 +258,13 @@ jobs:
           # name, SONAME, and real file. The latter two are symlinks preserved
           # by tar so that DT_NEEDED resolution works at load time.
           tar -czvf liblbug-linux-${{ matrix.arch }}.tar.gz lbug.h lbug.hpp liblbug.so liblbug.so.*
-          tar -czvf liblbug-static-linux-${{ matrix.arch }}-compat.tar.gz lbug.h lbug.hpp liblbug.a
+          tar -czvf liblbug-static-linux-${{ matrix.arch }}-compat.tar.gz lbug.h lbug.hpp liblbug.a deps
           tar -czvf lbug_cli-linux-${{ matrix.arch }}.tar.gz lbug
 
       - name: Create tarballs (Linux perf)
         if: runner.os == 'Linux' && matrix.variant == 'perf'
         run: |
-          tar -czvf liblbug-static-linux-${{ matrix.arch }}-perf.tar.gz lbug.h lbug.hpp liblbug.a
+          tar -czvf liblbug-static-linux-${{ matrix.arch }}-perf.tar.gz lbug.h lbug.hpp liblbug.a deps
 
       - name: Create tarballs (macOS)
         if: runner.os == 'macOS'
@@ -253,7 +274,7 @@ jobs:
           # symlinks preserved by tar so that LC_LOAD_DYLIB resolution works
           # at load time.
           tar -czvf liblbug-osx-${{ matrix.arch }}.tar.gz lbug.h lbug.hpp liblbug.dylib liblbug.*.dylib
-          tar -czvf liblbug-static-osx-${{ matrix.arch }}.tar.gz lbug.h lbug.hpp liblbug.a
+          tar -czvf liblbug-static-osx-${{ matrix.arch }}.tar.gz lbug.h lbug.hpp liblbug.a deps
           tar -czvf lbug_cli-osx-${{ matrix.arch }}.tar.gz lbug
 
       - name: Create zip files (Windows)
@@ -261,7 +282,7 @@ jobs:
         shell: pwsh
         run: |
           Compress-Archive -Path lbug.h, lbug.hpp, lbug_shared.dll, lbug_shared.lib -DestinationPath liblbug-windows-x86_64.zip
-          Compress-Archive -Path lbug.h, lbug.hpp, lbug.lib -DestinationPath liblbug-static-windows-x86_64.zip
+          Compress-Archive -Path lbug.h, lbug.hpp, lbug.lib, deps -DestinationPath liblbug-static-windows-x86_64.zip
           Compress-Archive -Path lbug.exe -DestinationPath lbug_cli-windows-x86_64.zip
 
       # ---- Verify shared-library tarball self-consistency ----
