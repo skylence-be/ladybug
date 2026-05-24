@@ -15,32 +15,33 @@ env:
 jobs:
   build-precompiled-bin:
     strategy:
+      fail-fast: false
       matrix:
         include:
           # Linux compat: broad glibc compatibility via manylinux_2_28 containers,
           # gcc-toolset-13 with -static-libstdc++. Produces shared + static + CLI.
-          # - os: ubuntu-latest
-          #   container: quay.io/pypa/manylinux_2_28_x86_64
-          #   variant: compat
-          #   arch: x86_64
-          # - os: ubuntu-24.04-arm
-          #   container: quay.io/pypa/manylinux_2_28_aarch64
-          #   variant: compat
-          #   arch: aarch64
+          - os: ubuntu-latest
+            container: quay.io/pypa/manylinux_2_28_x86_64
+            variant: compat
+            arch: x86_64
+          - os: ubuntu-24.04-arm
+            container: quay.io/pypa/manylinux_2_28_aarch64
+            variant: compat
+            arch: aarch64
           # Linux perf: LLVM 21 on a modern runner. Static library only (for
           # use by language bindings such as Node.js and Java).
-          # - os: ubuntu-24.04
-          #   variant: perf
-          #   arch: x86_64
-          # - os: ubuntu-24.04-arm
-          #   variant: perf
-          #   arch: aarch64
+          - os: ubuntu-24.04
+            variant: perf
+            arch: x86_64
+          - os: ubuntu-24.04-arm
+            variant: perf
+            arch: aarch64
           # macOS Intel (x86_64). Produces shared + static + CLI.
-          # - os: macos-15-intel
-          #   arch: x86_64
+          - os: macos-15-intel
+            arch: x86_64
           # macOS Apple Silicon (arm64). Produces shared + static + CLI.
-          # - os: macos-latest
-          #   arch: arm64
+          - os: macos-latest
+            arch: arm64
           # Windows x86_64. Produces shared + static + CLI.
           - os: windows-latest
     runs-on: ${{ matrix.os }}
